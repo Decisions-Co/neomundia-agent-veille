@@ -26,6 +26,17 @@ MAKE_API_KEY = os.environ["MAKE_API_KEY"].strip()
 MODEL = "claude-sonnet-4-6"
 HISTORIQUE_PATH = "historique_veille.json"
 
+# Correspondance Domaine -> Indicateur Qualiopi (critère 6), calculée ici plutôt que
+# par une formule dans le Sheet : Make écrase les formules pré-remplies à chaque
+# nouvelle ligne insérée, donc la valeur doit être une donnée écrite comme les autres.
+INDICATEURS_QUALIOPI = {
+    "Réglementaire": "Indicateur 23",
+    "Métier": "Indicateur 24",
+    "Pédagogique": "Indicateur 25",
+    "Technologique": "Indicateur 25",
+    "Handicap": "Indicateur 26",
+}
+
 # Un domaine = une recherche ciblée, pas une recherche générique unique.
 # Correspondance exacte avec les indicateurs Qualiopi (critère 6) :
 # Réglementaire -> 23, Métier -> 24, Pédagogique/Technologique -> 25, Handicap -> 26.
@@ -195,6 +206,7 @@ def envoyer_make(item):
     payload = {
         "date": datetime.now().strftime("%d/%m/%Y"),
         "domaine": item["domaine"],
+        "indicateur": INDICATEURS_QUALIOPI.get(item["domaine"], ""),
         "source": item.get("source", ""),
         "organisme": item.get("organisme", ""),
         "lien": item.get("lien", ""),
