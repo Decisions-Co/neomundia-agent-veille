@@ -184,8 +184,8 @@ def rechercher_domaine(domaine, liens_vus):
         if h in liens_vus:
             print(f"[{domaine['nom']}] Déjà signalé, ignoré : {lien}")
             continue
-        liens_vus.add(h)
         item["domaine"] = domaine["nom"]
+        item["_hash_lien"] = h  # marqué comme vu seulement après envoi réussi, cf. main()
         nouveaux.append(item)
 
     return nouveaux
@@ -232,6 +232,9 @@ def main():
         for item in items:
             if envoyer_make(item):
                 total_envoyes += 1
+                liens_vus.add(item["_hash_lien"])
+            else:
+                print(f"[{domaine['nom']}] Non marqué comme vu (envoi échoué) — sera retenté au prochain run.")
 
     historique["liens_vus"] = list(liens_vus)
     sauver_historique(historique)
