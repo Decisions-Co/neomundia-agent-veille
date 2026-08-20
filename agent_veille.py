@@ -19,9 +19,9 @@ from datetime import datetime
 
 import requests
 
-ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
-MAKE_WEBHOOK_URL = os.environ["MAKE_WEBHOOK_URL"]
-MAKE_API_KEY = os.environ["MAKE_API_KEY"]
+ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"].strip()
+MAKE_WEBHOOK_URL = os.environ["MAKE_WEBHOOK_URL"].strip()
+MAKE_API_KEY = os.environ["MAKE_API_KEY"].strip()
 
 MODEL = "claude-sonnet-4-6"
 HISTORIQUE_PATH = "historique_veille.json"
@@ -84,6 +84,13 @@ Réponds UNIQUEMENT avec un objet JSON valide, sans aucun texte avant ou après,
 ]}}
 
 Si rien de nouveau et substantiel n'est trouvé pour ce domaine, réponds {{"items": []}}.
+
+RÈGLE ABSOLUE : ta réponse finale doit être EXCLUSIVEMENT l'objet JSON ci-dessus, sans
+aucune phrase avant, après, ou à la place — même si tu n'as rien trouvé, même si tu as des
+observations intéressantes à partager sur pourquoi tu n'as rien trouvé (ex. un organisme en
+liquidation, une actualité trop ancienne). Ces observations n'ont pas leur place dans la
+réponse finale. Si tu as besoin de raisonner, fais-le, mais la dernière chose que tu écris
+doit être uniquement {{"items": [...]}} ou {{"items": []}}, rien d'autre.
 """
 
 
@@ -104,11 +111,22 @@ def hash_lien(lien):
 
 
 def extraire_json(texte):
-    """Le modèle répond parfois avec des balises ```json autour du JSON — on les retire."""
+    """Le modèle répond parfois avec des balises ```json autour du JSON — on les retire.
+    Si du texte parasite entoure malgré tout le JSON, on tente une extraction de secours
+    en isolant le premier { jusqu'au dernier } de la réponse."""
     texte = texte.strip()
-    texte = re.sub(r"^```(?:json)?\s*", "", texte)
-    texte = re.sub(r"\s*```$", "", texte)
-    return json.loads(texte)
+    texte_nettoye = re.sub(r"^```(?:json)?\s*", "", texte)
+    texte_nettoye = re.sub(r"\s*```$", "", texte_nettoye)
+    try:
+        return json.loads(texte_nettoye)
+    except json.JSONDecodeError:
+        pass
+
+    debut = texte.find("{")
+    fin = texte.rfind("}")
+    if debut != -1 and fin != -1 and fin > debut:
+        return json.loads(texte[debut:fin + 1])
+    raise json.JSONDecodeError("Aucun JSON exploitable trouvé", texte, 0)
 
 
 def rechercher_domaine(domaine, liens_vus):
@@ -194,26 +212,34 @@ def envoyer_make(item):
         )
         resp.raise_for_status()
         print(f"Envoyé à Make [{item['domaine']}] : {item.get('contenu', '')[:70]}")
+        return True
     except Exception as e:
         print(f"Erreur envoi Make [{item.get('domaine', '?')}] : {e}")
+        return False
 
 
 def main():
     print(f"Veille NEOMUNDIA — {datetime.now().strftime('%A %d %B %Y')}")
     historique = charger_historique()
     liens_vus = set(historique.get("liens_vus", []))
+    total_trouves = 0
     total_envoyes = 0
 
     for domaine in DOMAINES:
         print(f"\n--- Domaine : {domaine['nom']} ---")
         items = rechercher_domaine(domaine, liens_vus)
+        total_trouves += len(items)
         for item in items:
-            envoyer_make(item)
-            total_envoyes += 1
+            if envoyer_make(item):
+                total_envoyes += 1
 
     historique["liens_vus"] = list(liens_vus)
     sauver_historique(historique)
-    print(f"\nTerminé. {total_envoyes} entrée(s) envoyée(s) au Sheet, statut initial : À valider.")
+    print(f"\nTerminé. {total_trouves} actualité(s) identifiée(s), {total_envoyes} réellement "
+          f"envoyée(s) au Sheet (statut initial : À valider).")
+    if total_envoyes < total_trouves:
+        print(f"ATTENTION : {total_trouves - total_envoyes} actualité(s) trouvée(s) mais NON "
+              f"envoyée(s) au Sheet — voir les erreurs ci-dessus.")
 
 
 if __name__ == "__main__":
