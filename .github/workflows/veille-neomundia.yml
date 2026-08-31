@@ -1,41 +1,39 @@
 name: Veille NEOMUNDIA
-
 on:
   schedule:
     # Chaque lundi à 7h UTC (8h ou 9h heure de Paris selon la saison)
     - cron: '0 7 * * 1'
   workflow_dispatch: {}
 
+concurrency:
+  group: veille-neomundia-main
+  cancel-in-progress: false
+
 jobs:
   veille:
     runs-on: ubuntu-latest
-
     permissions:
       contents: write
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
       - name: Installer les dépendances
         run: pip install requests
-
       - name: Lancer la veille
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           MAKE_WEBHOOK_URL: ${{ secrets.MAKE_WEBHOOK_URL }}
           MAKE_API_KEY: ${{ secrets.MAKE_API_KEY }}
         run: python3 agent_veille.py
-
       - name: Committer l'historique mis à jour
         run: |
           git config user.name "Agent Veille NEOMUNDIA"
           git config user.email "actions@github.com"
           git add historique_veille.json
           git diff --staged --quiet || git commit -m "Historique veille $(date +%Y-%m-%d)"
+          git pull --rebase origin main
           git push
