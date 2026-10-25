@@ -1,7 +1,7 @@
 """
 Agent de veille NEOMUNDIA — dispositif déterministe (workflow, pas agentique).
 
-Chaque semaine : interroge Claude avec l'outil web_search pour chacun des 5
+Chaque semaine : interroge Claude avec l'outil web_search pour chacun des 6
 domaines de veille Qualiopi (critère 6, indicateurs 23 à 26), extrait les
 actualités réellement nouvelles et substantielles, et les transmet au
 Google Sheet "Veille NEOMUNDIA" via un webhook Make.com.
@@ -35,6 +35,9 @@ INDICATEURS_QUALIOPI = {
     "Pédagogique": "Indicateur 25",
     "Technologique": "Indicateur 25",
     "Handicap": "Indicateur 26",
+    # Rattachement de la veille juridique ; les obligations opérationnelles sont
+    # précisées dans l’impact et l’action, sans créer un nouvel indicateur.
+    "Violences sexistes et sexuelles": "Indicateur 23",
 }
 
 # Un domaine = une recherche ciblée, pas une recherche générique unique.
@@ -60,6 +63,21 @@ DOMAINES = [
     {
         "nom": "Handicap",
         "requete": "Agefiph FIPHFP accessibilité handicap formation professionnelle réglementation",
+    },
+    {
+        "nom": "Violences sexistes et sexuelles",
+        "requete": (
+            "violences sexistes et sexuelles formation professionnelle ; "
+            "référent violences sexistes et sexuelles organisme de formation ; "
+            "harcèlement sexuel stagiaire ; Qualiopi violences discriminations ; "
+            "prévention et traitement des signalements dans le cadre de la formation. "
+            "Priorité aux publications du ministère du Travail (travail-emploi.gouv.fr), "
+            "de Légifrance (legifrance.gouv.fr), de Centre Inffo (centre-inffo.fr) "
+            "et de France compétences (francecompetences.fr). "
+            "Distinguer les obligations réglementaires des recommandations ; "
+            "préciser le périmètre applicable (organismes de formation ou CFA) "
+            "et les dates d'entrée en vigueur vérifiées dans les textes sources."
+        ),
     },
 ]
 
