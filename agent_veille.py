@@ -15,7 +15,11 @@ import os
 import re
 import json
 import hashlib
-from datetime import datetime
+import unicodedata
+from html.parser import HTMLParser
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from zoneinfo import ZoneInfo
+from datetime import date, datetime, timedelta
 
 import requests
 
@@ -50,7 +54,7 @@ DOMAINES = [
     },
     {
         "nom": "Métier",
-        "requete": "France Compétences actualité métiers compétences emploi formation professionnelle",
+        "requete": "Impact concret de l’IA générative sur les tâches, métiers et compétences en entreprise : industrie, commerce, services, logistique, fonctions support. Alterner secteurs et fonctions. Privilégier les observatoires de branche, France Stratégie, Dares, Apec et études documentées.",
     },
     {
         "nom": "Pédagogique",
@@ -75,17 +79,21 @@ DOMAINES = [
             "de Légifrance (legifrance.gouv.fr), de Centre Inffo (centre-inffo.fr) "
             "et de France compétences (francecompetences.fr). "
             "Distinguer les obligations réglementaires des recommandations ; "
-            "préciser le périmètre applicable (organismes de formation ou CFA) "
+            "retenir les mesures applicables aux formations B2B intra-entreprise "
             "et les dates d'entrée en vigueur vérifiées dans les textes sources."
         ),
     },
 ]
 
 CONTEXTE_NEOMUNDIA = (
-    "NEOMUNDIA est l'activité de formation professionnelle de Décisions & Co, "
-    "organisme certifié Qualiopi. Formations en présentiel, distanciel et FEST/FOAD, "
-    "à destination de salariés et demandeurs d'emploi. L'évaluation d'impact doit "
-    "être concrète et actionnable pour cet organisme précis, jamais générique."
+    "Neomundia, pôle formation de Décisions & Co, dispense des formations IA sur mesure, "
+    "intra-entreprise, en présentiel chez le client ou à distance, non certifiantes, "
+    "pour des entreprises de tous secteurs. Les formateurs sont internes, sans sous-traitance. "
+    "Exclure les sujets centrés sur CPF, EDOF, Mon Compte Formation, apprentissage, NPEC, CFA, "
+    "RNCP, Répertoire spécifique, titres professionnels, VAE, France Travail, demandeurs d’emploi, "
+    "Transitions Pro et PTP. Un texte transversal ne passe que si une disposition s’applique "
+    "directement à Neomundia. Pour le domaine Métier, préciser la tâche ou compétence qui évolue "
+    "et une implication concrète pour les formations."
 )
 
 SYSTEM_PROMPT = f"""Tu es l'agent de veille de NEOMUNDIA. Ta mission : identifier UNIQUEMENT
@@ -97,7 +105,14 @@ ou spéculative.
 
 Pour chaque actualité pertinente trouvée (0 à 2 maximum — la rareté est normale, ne force
 jamais une entrée artificielle si rien de substantiel n'est paru), fournis un résumé factuel,
-sans opinion ni exagération.
+sans opinion ni exagération. Utilise une publication précise, consultable, jamais une page
+d’accueil. Privilégie la source primaire. Impact et action doivent être renseignés.
+Préfère un résumé sans chiffres. Pour tout chiffre, donne une citation exacte de la source
+qui établit le chiffre et son contexte. Indique la date exacte de publication de la source.
+Pour un événement ou appel à projets, renseigne l’échéance et cite le passage qui l’établit.
+Écarte les échéances passées et les rappels sans nouveauté substantielle.
+Pour un même sujet, utilise une identité stable, indépendante du titre et du lien.
+Pour une évolution réellement nouvelle, précise la mesure et ce qui change.
 
 Réponds UNIQUEMENT avec un objet JSON valide, sans aucun texte avant ou après, au format exact :
 {{"items": [
@@ -105,6 +120,11 @@ Réponds UNIQUEMENT avec un objet JSON valide, sans aucun texte avant ou après,
     "source": "nom du site ou de la publication",
     "organisme": "organisme émetteur (ex: Agefiph, Légifrance, France Compétences, Centre Inffo...)",
     "lien": "URL directe de la source",
+    "identite": "identité stable : numéro de texte ou nom de la mesure, de l’événement ou de l’appel et édition si pertinente",
+    "publication": "AAAA-MM-JJ",
+    "type": "actualite, evenement ou appel",
+    "echeance": "AAAA-MM-JJ pour un événement ou appel, sinon vide",
+    "preuve": "extrait exact de la page justifiant les chiffres et l’échéance, sinon vide",
     "contenu": "résumé factuel en une phrase",
     "impact": "impact concret pour NEOMUNDIA, une à deux phrases",
     "diffusion": "Oui ou Non — Oui si les formateurs ou l'équipe pédagogique doivent en avoir connaissance",
@@ -135,8 +155,141 @@ def sauver_historique(historique):
         json.dump(historique, f, ensure_ascii=False, indent=2)
 
 
-def hash_lien(lien):
-    return hashlib.sha256(lien.strip().lower().encode("utf-8")).hexdigest()
+def aujourd_hui():
+    return datetime.now(ZoneInfo("Europe/Paris")).date()
+
+
+def normaliser(texte):
+    texte = unicodedata.normalize("NFKD", texte.casefold())
+    texte = "".join(c for c in texte if not unicodedata.combining(c))
+    return " ".join(re.findall(r"\w+", texte))
+
+
+def empreinte(texte):
+    return hashlib.sha256(texte.encode("utf-8")).hexdigest()
+
+
+def url_precise(lien):
+    url = urlsplit(lien)
+    if url.scheme not in {"http", "https"} or not url.hostname or url.username or url.password:
+        return ""
+    if not url.path.strip("/"):
+        return ""
+    return lien
+
+
+def url_normalisee(lien):
+    url = urlsplit(lien)
+    query = urlencode(sorted(
+        (k, v) for k, v in parse_qsl(url.query, keep_blank_values=True)
+        if not k.lower().startswith("utm_") and k.lower() not in {"fbclid", "gclid"}
+    ))
+    return urlunsplit(("", url.netloc.lower().removeprefix("www."), url.path.rstrip("/"), query, ""))
+
+
+def cles_sujet(item):
+    lien = item["lien"]
+    contenu = normaliser(item["contenu"])
+    identite = normaliser(item.get("identite", ""))
+    cles = {"url:" + url_normalisee(lien), "texte:" + contenu}
+    if identite:
+        cles.add("sujet:" + identite)
+    texte = identite + " " + contenu
+    decret = re.search(r"\bdecret\s+(?:n\s+)?(20\d{2})\s+(\d+)\b", texte)
+    if decret:
+        cles.add("decret:" + "-".join(decret.groups()))
+    if "impulsion ia" in texte:
+        cles.add("plan:impulsion ia")
+    if "ai act" in texte or "reglement europeen sur l ia" in texte:
+        article = re.search(r"\barticle (\d+)\b", texte)
+        cles.add("ai act:" + (article[1] if article else "general"))
+    return {empreinte(cle) for cle in cles}
+
+
+class TexteHTML(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.masque = False
+        self.parties = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag in {"script", "style"}:
+            self.masque = True
+
+    def handle_endtag(self, tag):
+        if tag in {"script", "style"}:
+            self.masque = False
+
+    def handle_data(self, data):
+        if not self.masque:
+            self.parties.append(data)
+
+
+def chiffres(texte):
+    texte = re.sub(r"(?<=\d)[ \u00a0\u202f](?=\d{3}\b)", "", texte)
+    return set(re.findall(r"\d+(?:[.,]\d+)?", texte.replace(",", ".")))
+
+
+def valider_source(item, jour):
+    for champ in ("source", "organisme", "lien", "contenu", "impact", "action", "identite"):
+        if not isinstance(item.get(champ), str) or not item[champ].strip():
+            return "champ manquant : " + champ
+
+    try:
+        publication = date.fromisoformat(item.get("publication", ""))
+        if not jour - timedelta(days=7) <= publication <= jour:
+            return "publication hors période"
+        if item.get("type") not in {"actualite", "evenement", "appel"}:
+            return "type invalide"
+        echeance = None
+        if item["type"] in {"evenement", "appel"}:
+            echeance = date.fromisoformat(item.get("echeance", ""))
+            if echeance < jour:
+                return "échéance passée"
+        lien = item["lien"].strip()
+        if not url_precise(lien):
+            return "lien non précis"
+        with requests.get(lien, timeout=12, stream=True) as reponse:
+            reponse.raise_for_status()
+            if not url_precise(reponse.url):
+                return "redirection vers une page d’accueil"
+            mime = reponse.headers.get("Content-Type", "").split(";")[0].strip().lower()
+            if mime not in {"text/html", "text/plain", "application/xhtml+xml"}:
+                return "source non vérifiable automatiquement"
+            limite = 2_000_000
+            donnees = bytearray()
+            for bloc in reponse.iter_content(16384):
+                donnees.extend(bloc)
+                if len(donnees) >= limite:
+                    break
+            texte = donnees[:limite].decode(reponse.encoding or "utf-8", errors="replace")
+    except (requests.RequestException, ValueError, TypeError, LookupError):
+        return "source inaccessible ou date invalide"
+
+    if mime != "text/plain":
+        lecteur = TexteHTML()
+        lecteur.feed(texte)
+        texte = " ".join(lecteur.parties)
+    source = normaliser(texte)
+    if len(source) < 200:
+        return "source insuffisante"
+    preuve = item.get("preuve") or ""
+    if not isinstance(preuve, str):
+        return "preuve invalide"
+    nombres = chiffres(" ".join(item[c] for c in ("contenu", "impact", "action")))
+    if nombres or echeance:
+        extrait = normaliser(preuve)
+        if len(extrait) < 15 or extrait not in source or not nombres <= chiffres(preuve):
+            return "chiffres ou échéance sans preuve vérifiable"
+    if echeance:
+        mois = ("janvier février mars avril mai juin juillet août septembre octobre novembre décembre").split()
+        dates = (echeance.isoformat(), echeance.strftime("%d/%m/%Y"),
+                 f"{echeance.day} {mois[echeance.month - 1]} {echeance.year}",
+                 f"{echeance.day} {mois[echeance.month - 1]}")
+        if not any(re.search(r"\b" + normaliser(d) + r"\b", extrait) for d in dates):
+            return "échéance absente de la preuve"
+    item["lien"] = lien
+    return ""
 
 
 def extraire_json(texte):
@@ -158,7 +311,7 @@ def extraire_json(texte):
     raise json.JSONDecodeError("Aucun JSON exploitable trouvé", texte, 0)
 
 
-def rechercher_domaine(domaine, liens_vus):
+def rechercher_domaine(domaine, jour):
     resp = requests.post(
         "https://api.anthropic.com/v1/messages",
         headers={
@@ -176,7 +329,7 @@ def rechercher_domaine(domaine, liens_vus):
                 "content": (
                     f"Domaine de veille : {domaine['nom']}.\n"
                     f"Requête de recherche : {domaine['requete']}\n"
-                    f"Date du jour : {datetime.now().strftime('%d/%m/%Y')}. "
+                    f"Date du jour : {jour.strftime('%d/%m/%Y')}. "
                     f"Cherche uniquement les actualités des 7 derniers jours."
                 ),
             }],
@@ -204,25 +357,13 @@ def rechercher_domaine(domaine, liens_vus):
         print(f"[{domaine['nom']}] Réponse non-JSON, ignorée : {texte_final[:300]}")
         return []
 
-    nouveaux = []
-    for item in parsed.get("items", []):
-        lien = (item.get("lien") or "").strip()
-        if not lien:
-            continue
-        h = hash_lien(lien)
-        if h in liens_vus:
-            print(f"[{domaine['nom']}] Déjà signalé, ignoré : {lien}")
-            continue
-        item["domaine"] = domaine["nom"]
-        item["_hash_lien"] = h  # marqué comme vu seulement après envoi réussi, cf. main()
-        nouveaux.append(item)
-
-    return nouveaux
+    items = parsed.get("items", []) if isinstance(parsed, dict) else []
+    return [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
 
 
-def envoyer_make(item):
+def envoyer_make(item, jour):
     payload = {
-        "date": datetime.now().strftime("%d/%m/%Y"),
+        "date": jour.strftime("%d/%m/%Y"),
         "domaine": item["domaine"],
         "indicateur": INDICATEURS_QUALIOPI.get(item["domaine"], ""),
         "source": item.get("source", ""),
@@ -249,30 +390,37 @@ def envoyer_make(item):
 
 
 def main():
-    print(f"Veille NEOMUNDIA — {datetime.now().strftime('%A %d %B %Y')}")
+    jour = aujourd_hui()
     historique = charger_historique()
-    liens_vus = set(historique.get("liens_vus", []))
-    total_trouves = 0
+    debut = (jour - timedelta(days=56)).isoformat()
+    sujets = {
+        cle: date_vue for cle, date_vue in historique.get("sujets", {}).items()
+        if debut <= date_vue <= jour.isoformat()
+    }
+    historique["sujets"] = sujets
     total_envoyes = 0
-
     for domaine in DOMAINES:
         print(f"\n--- Domaine : {domaine['nom']} ---")
-        items = rechercher_domaine(domaine, liens_vus)
-        total_trouves += len(items)
-        for item in items:
-            if envoyer_make(item):
+        envoyes = 0
+        for item in rechercher_domaine(domaine, jour):
+            if envoyes == 2:
+                break
+            erreur = valider_source(item, jour)
+            if erreur:
+                print(f"Ignoré : {erreur}")
+                continue
+            cles = cles_sujet(item)
+            if cles.intersection(sujets):
+                print("Ignoré : sujet déjà signalé dans les 56 derniers jours.")
+                continue
+            item["domaine"] = domaine["nom"]
+            if envoyer_make(item, jour):
+                envoyes += 1
                 total_envoyes += 1
-                liens_vus.add(item["_hash_lien"])
-            else:
-                print(f"[{domaine['nom']}] Non marqué comme vu (envoi échoué) — sera retenté au prochain run.")
-
-    historique["liens_vus"] = list(liens_vus)
+                sujets.update(dict.fromkeys(cles, jour.isoformat()))
+                sauver_historique(historique)
     sauver_historique(historique)
-    print(f"\nTerminé. {total_trouves} actualité(s) identifiée(s), {total_envoyes} réellement "
-          f"envoyée(s) au Sheet (statut initial : À valider).")
-    if total_envoyes < total_trouves:
-        print(f"ATTENTION : {total_trouves - total_envoyes} actualité(s) trouvée(s) mais NON "
-              f"envoyée(s) au Sheet — voir les erreurs ci-dessus.")
+    print(f"Terminé. {total_envoyes} actualité(s) transmises à Make (statut initial : À valider).")
 
 
 if __name__ == "__main__":
