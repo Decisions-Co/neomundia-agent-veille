@@ -328,7 +328,7 @@ def extraire_json(texte):
     raise json.JSONDecodeError("Aucun JSON exploitable trouvé", texte, 0)
 
 
-def rechercher_domaine(domaine, jour):
+def rechercher_domaine(domaine, jour, reprise=False, instruction=""):
     resp = requests.post(
         "https://api.anthropic.com/v1/messages",
         headers={
@@ -338,7 +338,7 @@ def rechercher_domaine(domaine, jour):
         },
         json={
             "model": MODEL,
-            "max_tokens": 1500,
+            "max_tokens": 3000,
             "tools": [{"type": "web_search_20250305", "name": "web_search"}],
             "system": SYSTEM_PROMPT,
             "messages": [{
@@ -347,7 +347,8 @@ def rechercher_domaine(domaine, jour):
                     f"Domaine de veille : {domaine['nom']}.\n"
                     f"Requête de recherche : {domaine['requete']}\n"
                     f"Date du jour : {jour.strftime('%d/%m/%Y')}. "
-                    f"Cherche uniquement les actualités des 7 derniers jours."
+                    "Cherche uniquement les actualités des 7 derniers jours.\n"
+                    + instruction
                 ),
             }],
         },
@@ -359,23 +360,24 @@ def rechercher_domaine(domaine, jour):
         return []
 
     data = resp.json()
-    texte_final = ""
-    for bloc in data.get("content", []):
-        if bloc.get("type") == "text":
-            texte_final = bloc["text"]
+    textes = [bloc["text"] for bloc in data.get("content", []) if bloc.get("type") == "text"]
+    for texte in reversed(textes):
+        try:
+            parsed = extraire_json(texte)
+        except json.JSONDecodeError:
+            continue
+        items = parsed.get("items") if isinstance(parsed, dict) else None
+        if isinstance(items, list) and all(isinstance(item, dict) for item in items):
+            return items
 
-    if not texte_final:
-        print(f"[{domaine['nom']}] Aucune réponse texte exploitable.")
-        return []
-
-    try:
-        parsed = extraire_json(texte_final)
-    except json.JSONDecodeError:
-        print(f"[{domaine['nom']}] Réponse non-JSON, ignorée : {texte_final[:300]}")
-        return []
-
-    items = parsed.get("items", []) if isinstance(parsed, dict) else []
-    return [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+    print(f"[{domaine['nom']}] Aucun JSON valide (arrêt API : {data.get('stop_reason')}).")
+    if not reprise:
+        print(f"[{domaine['nom']}] Nouvelle tentative de recherche.")
+        return rechercher_domaine(
+            domaine, jour, reprise=True,
+            instruction='Réponds directement avec {"items": [...]} ou {"items": []}, sans analyse.',
+        )
+    return []
 
 
 def envoyer_make(item, jour):
@@ -419,7 +421,9 @@ def main():
     for domaine in DOMAINES:
         print(f"\n--- Domaine : {domaine['nom']} ---")
         envoyes = 0
-        for item in rechercher_domaine(domaine, jour):
+        items = rechercher_domaine(domaine, jour)
+        remplacement_legifrance = False
+        for item in items:
             if envoyes == 2:
                 break
             erreur = valider_source(item, jour)
@@ -427,6 +431,21 @@ def main():
                 lien = item.get("lien")
                 url = lien.split("?", 1)[0].split("#", 1)[0] if isinstance(lien, str) else ""
                 print(f"Ignoré : {erreur} | URL : {url[:400]!r}")
+                if (erreur == "source inaccessible : HTTP 403"
+                        and urlsplit(url).hostname in {"www.legifrance.gouv.fr", "legifrance.gouv.fr"}
+                        and not remplacement_legifrance):
+                    remplacement_legifrance = True
+                    print("Légifrance refuse l’accès. Recherche d’une publication officielle accessible.")
+                    items.extend(rechercher_domaine(
+                        domaine, jour, reprise=True,
+                        instruction=(
+                            f"Le lien Légifrance {url} est inaccessible. "
+                            "Cherche une publication officielle accessible qui documente la même mesure, "
+                            "par exemple sur le site du ministère concerné ou service-public.gouv.fr. "
+                            "Écarte les liens Légifrance pour cette recherche. "
+                            'Sans publication officielle précise et récente, réponds {"items": []}.'
+                        ),
+                    ))
                 continue
             cles = cles_sujet(item)
             if cles.intersection(sujets):
