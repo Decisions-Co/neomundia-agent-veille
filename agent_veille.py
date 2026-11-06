@@ -422,7 +422,7 @@ def main():
         print(f"\n--- Domaine : {domaine['nom']} ---")
         envoyes = 0
         items = rechercher_domaine(domaine, jour)
-        remplacement_legifrance = False
+        remplacement_tente = False
         for item in items:
             if envoyes == 2:
                 break
@@ -431,19 +431,22 @@ def main():
                 lien = item.get("lien")
                 url = lien.split("?", 1)[0].split("#", 1)[0] if isinstance(lien, str) else ""
                 print(f"Ignoré : {erreur} | URL : {url[:400]!r}")
-                if (erreur == "source inaccessible : HTTP 403"
-                        and urlsplit(url).hostname in {"www.legifrance.gouv.fr", "legifrance.gouv.fr"}
-                        and not remplacement_legifrance):
-                    remplacement_legifrance = True
-                    print("Légifrance refuse l’accès. Recherche d’une publication officielle accessible.")
+                if erreur == "source inaccessible : HTTP 403" and not remplacement_tente:
+                    remplacement_tente = True
+                    hote = urlsplit(url).hostname
+                    print(f"Accès refusé par {hote}. Recherche d’une autre source.")
+                    exigence = (
+                        "Utilise uniquement une publication officielle. "
+                        if hote in {"www.legifrance.gouv.fr", "legifrance.gouv.fr"} else
+                        "Privilégie la publication originale ou une source officielle. "
+                    )
                     items.extend(rechercher_domaine(
                         domaine, jour, reprise=True,
                         instruction=(
-                            f"Le lien Légifrance {url} est inaccessible. "
-                            "Cherche une publication officielle accessible qui documente la même mesure, "
-                            "par exemple sur le site du ministère concerné ou service-public.gouv.fr. "
-                            "Écarte les liens Légifrance pour cette recherche. "
-                            'Sans publication officielle précise et récente, réponds {"items": []}.'
+                            f"La source {url} renvoie HTTP 403. "
+                            f"Cherche une publication accessible sur le même sujet, hors du site {hote}. "
+                            + exigence
+                            + 'Sans source précise et récente, réponds {"items": []}.'
                         ),
                     ))
                 continue
