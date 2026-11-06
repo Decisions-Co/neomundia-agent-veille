@@ -230,7 +230,16 @@ def chiffres(texte):
     return set(re.findall(r"\d+(?:[.,]\d+)?", texte.replace(",", ".")))
 
 
-def valider_source(item, jour):
+def source_officielle(lien):
+    hote = urlsplit(lien).hostname or ""
+    return hote.endswith((".gouv.fr", ".service-public.fr")) or hote in {
+        "service-public.fr", "service-public.gouv.fr", "vie-publique.fr",
+        "www.vie-publique.fr", "assemblee-nationale.fr", "www.assemblee-nationale.fr",
+        "senat.fr", "www.senat.fr",
+    }
+
+
+def valider_source(item, jour, officielle=False):
     for champ in ("source", "organisme", "lien", "contenu", "impact", "action", "identite"):
         if not isinstance(item.get(champ), str) or not item[champ].strip():
             return "champ manquant : " + champ
@@ -260,10 +269,14 @@ def valider_source(item, jour):
     try:
         if not url_precise(lien):
             return "lien non précis"
+        if officielle and not source_officielle(lien):
+            return "source de remplacement non officielle"
         with requests.get(lien, timeout=12, stream=True) as reponse:
             reponse.raise_for_status()
             if not url_precise(reponse.url):
                 return "redirection vers une page d’accueil"
+            if officielle and not source_officielle(reponse.url):
+                return "redirection vers une source non officielle"
             mime = reponse.headers.get("Content-Type", "").split(";")[0].strip().lower()
             if mime not in {"text/html", "text/plain", "application/xhtml+xml"}:
                 return f"format de source non pris en charge : {mime or 'inconnu'}"
@@ -294,7 +307,7 @@ def valider_source(item, jour):
     if not isinstance(preuve, str):
         return "preuve invalide"
     nombres = chiffres(" ".join(item[c] for c in ("contenu", "impact", "action")))
-    if nombres or echeance:
+    if nombres or echeance or item.get("_reformulation"):
         extrait = normaliser(preuve)
         if len(extrait) < 15 or extrait not in source or not nombres <= chiffres(preuve):
             return "chiffres ou échéance sans preuve vérifiable"
@@ -421,12 +434,13 @@ def main():
     for domaine in DOMAINES:
         print(f"\n--- Domaine : {domaine['nom']} ---")
         envoyes = 0
-        items = rechercher_domaine(domaine, jour)
+        items = [(item, False) for item in rechercher_domaine(domaine, jour)]
         remplacement_tente = False
-        for item in items:
+        reformulation_tentee = False
+        for item, officielle in items:
             if envoyes == 2:
                 break
-            erreur = valider_source(item, jour)
+            erreur = valider_source(item, jour, officielle=officielle)
             if erreur:
                 lien = item.get("lien")
                 url = lien.split("?", 1)[0].split("#", 1)[0] if isinstance(lien, str) else ""
@@ -440,7 +454,8 @@ def main():
                         if hote in {"www.legifrance.gouv.fr", "legifrance.gouv.fr"} else
                         "Privilégie la publication originale ou une source officielle. "
                     )
-                    items.extend(rechercher_domaine(
+                    source_exigee = hote in {"www.legifrance.gouv.fr", "legifrance.gouv.fr"}
+                    alternatives = rechercher_domaine(
                         domaine, jour, reprise=True,
                         instruction=(
                             f"La source {url} renvoie HTTP 403. "
@@ -448,7 +463,30 @@ def main():
                             + exigence
                             + 'Sans source précise et récente, réponds {"items": []}.'
                         ),
-                    ))
+                    )
+                    items.extend((alternative, source_exigee) for alternative in alternatives)
+                if (erreur == "chiffres ou échéance sans preuve vérifiable"
+                        and domaine["nom"] == "Métier" and item.get("type") == "actualite"
+                        and not reformulation_tentee):
+                    reformulation_tentee = True
+                    print("Recherche d’une reformulation sans chiffre, avec extrait de la même source.")
+                    alternatives = rechercher_domaine(
+                        domaine, jour, reprise=True,
+                        instruction=(
+                            f"Reprends uniquement cette actualité et cette URL exacte : {url}. "
+                            "Supprime tous les chiffres dans contenu, impact et action. "
+                            "Fournis dans preuve un extrait exact de la page qui étaye le résumé. "
+                            "Conserve la date de publication. Si impossible, renvoie une liste vide."
+                        ),
+                    )
+                    for alternative in alternatives:
+                        if (alternative.get("lien") == item.get("lien")
+                                and alternative.get("publication") == item.get("publication")
+                                and alternative.get("type") == "actualite"
+                                and not chiffres(" ".join(str(alternative.get(c, "")) for c in
+                                                         ("contenu", "impact", "action")))):
+                            alternative["_reformulation"] = True
+                            items.append((alternative, officielle))
                 continue
             cles = cles_sujet(item)
             if cles.intersection(sujets):
