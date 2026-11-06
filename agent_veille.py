@@ -235,18 +235,29 @@ def valider_source(item, jour):
         if not isinstance(item.get(champ), str) or not item[champ].strip():
             return "champ manquant : " + champ
 
+    publication_brute = item.get("publication")
     try:
-        publication = date.fromisoformat(item.get("publication", ""))
-        if not jour - timedelta(days=7) <= publication <= jour:
-            return "publication hors période"
-        if item.get("type") not in {"actualite", "evenement", "appel"}:
-            return "type invalide"
-        echeance = None
-        if item["type"] in {"evenement", "appel"}:
-            echeance = date.fromisoformat(item.get("echeance", ""))
-            if echeance < jour:
-                return "échéance passée"
-        lien = item["lien"].strip()
+        publication = date.fromisoformat(publication_brute)
+    except (ValueError, TypeError):
+        return f"date de publication invalide : {publication_brute!r}"[:200]
+    debut = jour - timedelta(days=7)
+    if not debut <= publication <= jour:
+        return f"publication hors période : {publication} (du {debut} au {jour})"
+    if item.get("type") not in {"actualite", "evenement", "appel"}:
+        return "type invalide"
+
+    echeance = None
+    if item["type"] in {"evenement", "appel"}:
+        echeance_brute = item.get("echeance")
+        try:
+            echeance = date.fromisoformat(echeance_brute)
+        except (ValueError, TypeError):
+            return f"date d’échéance invalide : {echeance_brute!r}"[:200]
+        if echeance < jour:
+            return f"échéance passée : {echeance} (date du jour : {jour})"
+
+    lien = item["lien"].strip()
+    try:
         if not url_precise(lien):
             return "lien non précis"
         with requests.get(lien, timeout=12, stream=True) as reponse:
@@ -255,7 +266,7 @@ def valider_source(item, jour):
                 return "redirection vers une page d’accueil"
             mime = reponse.headers.get("Content-Type", "").split(";")[0].strip().lower()
             if mime not in {"text/html", "text/plain", "application/xhtml+xml"}:
-                return "source non vérifiable automatiquement"
+                return f"format de source non pris en charge : {mime or 'inconnu'}"
             limite = 2_000_000
             donnees = bytearray()
             for bloc in reponse.iter_content(16384):
@@ -263,8 +274,14 @@ def valider_source(item, jour):
                 if len(donnees) >= limite:
                     break
             texte = donnees[:limite].decode(reponse.encoding or "utf-8", errors="replace")
-    except (requests.RequestException, ValueError, TypeError, LookupError):
-        return "source inaccessible ou date invalide"
+    except requests.HTTPError as erreur:
+        return f"source inaccessible : HTTP {erreur.response.status_code}"
+    except requests.RequestException as erreur:
+        return f"source inaccessible : {type(erreur).__name__}"
+    except ValueError:
+        return "URL de source invalide"
+    except LookupError:
+        return "encodage de source inconnu"
 
     if mime != "text/plain":
         lecteur = TexteHTML()
@@ -407,7 +424,9 @@ def main():
                 break
             erreur = valider_source(item, jour)
             if erreur:
-                print(f"Ignoré : {erreur}")
+                lien = item.get("lien")
+                url = lien.split("?", 1)[0].split("#", 1)[0] if isinstance(lien, str) else ""
+                print(f"Ignoré : {erreur} | URL : {url[:400]!r}")
                 continue
             cles = cles_sujet(item)
             if cles.intersection(sujets):
